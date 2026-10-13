@@ -1,0 +1,11 @@
+# Build output and host-test binaries
+build/
+*.bin
+*.elf
+*.map
+test/test_logic
+
+# Editor / OS files
+.vscode/
+.DS_Store
+__pycache__/

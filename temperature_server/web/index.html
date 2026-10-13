@@ -1,0 +1,1426 @@
+<!doctype html>
+<!--
+  Room Temperature - dashboard (single self-contained page, REQ-WEB-02/03).
+
+  No external resources: no CDN, fonts, icon fonts or chart library, because the
+  server is often used through its own access point without internet access.
+  Icons are inline SVG, charts are drawn as SVG by drawChart() below.
+
+  Edit this file, preview it with `python3 tools/mock_server.py`, then run
+  `python3 tools/build_web.py` to embed it in the firmware.
+
+  Requirements covered: REQ-UI-01 .. REQ-UI-13, REQ-DATA-02..04, REQ-NET-07.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Room Temperature</title>
+<style>
+/* ==========================================================================
+   1. DESIGN TOKENS (REQ-UI-11): light theme, dark theme follows the system
+   ========================================================================== */
+:root {
+  --bg: #f3efe8;
+  --surface: #fffdfa;
+  --surface-2: #f4f0e8;
+  --text: #1f1c17;
+  --muted: #6d675d;
+  --line: #e4ded2;
+  --accent: #2d6cdf;
+  --ok: #17835a;
+  --warn: #b26a00;
+  --bad: #cf3a34;
+  --info: #2468c9;
+  --shadow: 0 1px 2px rgba(60, 45, 15, .06), 0 10px 30px rgba(60, 45, 15, .08);
+  --floor-a: #efe6d6;
+  --floor-b: #e7dcc7;
+  --wall: #d3c6ac;
+  --glass: rgba(255, 253, 250, .82);
+  --s1: #3b6fe0; --s2: #d9820b; --s3: #17936e; --s4: #a24fd1;   /* node line colours */
+  --radius: 22px;
+  --gap: 16px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12110e;
+    --surface: #1c1a16;
+    --surface-2: #25221d;
+    --text: #f1ede5;
+    --muted: #a39c8f;
+    --line: #35312a;
+    --accent: #6c9bff;
+    --ok: #4cc791;
+    --warn: #f0b04a;
+    --bad: #ff7a72;
+    --info: #78aaff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 32px rgba(0, 0, 0, .35);
+    --floor-a: #2a2721;
+    --floor-b: #231f1a;
+    --wall: #3d372d;
+    --glass: rgba(28, 26, 22, .80);
+    --s1: #6c9bff; --s2: #f0a43a; --s3: #46c79c; --s4: #c98bf0;
+  }
+}
+
+/* ==========================================================================
+   2. BASE
+   ========================================================================== */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.num { font-variant-numeric: tabular-nums; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+svg.i { width: 1.15em; height: 1.15em; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .mute { color: var(--muted); } .info { color: var(--info); }
+
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px 48px; }
+
+/* ==========================================================================
+   3. HEADER (REQ-UI-04)
+   ========================================================================== */
+header.top {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 20px 0 14px; flex-wrap: wrap;
+}
+.title h1 { margin: 0; font-size: 26px; letter-spacing: -.02em; line-height: 1.15; }
+.title p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+.top-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow);
+  font-weight: 600; font-size: 14px; min-height: 44px;
+}
+.pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); }
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-width: 44px; min-height: 44px; padding: 0 14px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow);
+}
+.icon-btn:hover { border-color: var(--accent); }
+
+/* ==========================================================================
+   4. BANNERS (REQ-UI-10, REQ-UI-12)
+   ========================================================================== */
+#banners { display: grid; gap: 8px; margin-bottom: 8px; }
+.banner {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 16px;
+  border-radius: 16px; border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow);
+}
+.banner .msg { flex: 1 1 240px; }
+.banner.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 9%, var(--surface)); }
+.banner.bad  { border-color: color-mix(in srgb, var(--bad) 45%, var(--line));  background: color-mix(in srgb, var(--bad) 9%, var(--surface)); }
+.banner.info { border-color: color-mix(in srgb, var(--info) 40%, var(--line)); background: color-mix(in srgb, var(--info) 8%, var(--surface)); }
+.banner button.link { background: none; border: 0; padding: 6px 8px; color: var(--accent); font-weight: 600; border-radius: 8px; min-height: 36px; }
+
+/* ==========================================================================
+   5. LAYOUT
+   ========================================================================== */
+.grid { display: grid; gap: var(--gap); grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 900px) {
+  .grid { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); }
+  .span-2 { grid-column: 1 / -1; }
+}
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 18px;
+}
+.card h2 { margin: 0 0 12px; font-size: 16px; letter-spacing: -.01em; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.card-head h2 { margin: 0; }
+
+/* summary tiles */
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--gap); margin-bottom: var(--gap); }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 14px 16px; box-shadow: var(--shadow); min-width: 0; }
+.tile .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.tile .v { font-size: 30px; font-weight: 700; letter-spacing: -.03em; line-height: 1.15; }
+.tile .v small { font-size: 15px; font-weight: 600; color: var(--muted); margin-left: 2px; }
+.tile .s { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 520px) { .tile .v { font-size: 24px; } .tile { padding: 12px; } }
+
+/* ==========================================================================
+   6. ROOM VIEW (REQ-UI-01, REQ-UI-02)
+   ========================================================================== */
+.room {
+  position: relative; width: 100%; aspect-ratio: 16 / 10; min-height: 340px;
+  border-radius: 26px; overflow: hidden; border: 6px solid var(--wall);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 79px, rgba(0,0,0,.035) 79px 80px),
+    linear-gradient(135deg, var(--floor-a), var(--floor-b));
+  box-shadow: inset 0 0 40px rgba(0,0,0,.08);
+}
+.room .heat { position: absolute; inset: 0; transition: background 1s ease; pointer-events: none; }
+.room .label {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); text-align: center;
+  color: var(--muted); opacity: .8; font-size: 13px; max-width: 46%; pointer-events: none;
+}
+.room .label b { display: block; font-size: 20px; color: var(--text); opacity: .55; letter-spacing: -.01em; }
+@media (max-width: 640px) { .room { aspect-ratio: 1 / 1.05; min-height: 380px; } }
+
+.bubble {
+  position: absolute; width: min(44%, 210px); text-align: left; padding: 12px 14px;
+  border-radius: 20px; border: 1.5px solid var(--tint, var(--line));
+  background: linear-gradient(145deg, color-mix(in srgb, var(--tint, transparent) 16%, var(--glass)), var(--glass));
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  box-shadow: 0 6px 20px rgba(0,0,0,.12);
+  transition: transform .2s ease, opacity .3s ease, border-color .6s ease;
+  display: grid; gap: 2px;
+}
+.bubble:hover { transform: translateY(-2px); }
+.bubble[data-corner="0"] { left: 14px;  top: 14px; }
+.bubble[data-corner="1"] { right: 14px; top: 14px; }
+.bubble[data-corner="2"] { left: 14px;  bottom: 14px; }
+.bubble[data-corner="3"] { right: 14px; bottom: 14px; }
+.bubble .row { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
+.bubble .nm { font-weight: 600; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bubble .t { font-size: clamp(30px, 5.2vw, 42px); font-weight: 750; letter-spacing: -.04em; line-height: 1.05; }
+.bubble .t small { font-size: .42em; font-weight: 600; color: var(--muted); margin-left: 2px; letter-spacing: 0; }
+.bubble .tag { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; margin-left: 6px; vertical-align: middle; }
+.bubble .st { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; font-size: 12.5px; font-weight: 600; min-width: 0; }
+.bubble .st span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bubble .age { color: var(--muted); font-weight: 500; margin-left: auto; padding-left: 6px; white-space: nowrap; }
+.bubble .badges { display: inline-flex; gap: 4px; }
+.bubble.dim { opacity: .62; filter: saturate(.35); border-style: dashed; }
+.bubble.ghost { opacity: .5; border-style: dashed; background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; cursor: default; }
+.bubble.ghost:hover { transform: none; }
+@media (max-width: 640px) { .bubble { width: calc(50% - 20px); padding: 10px 11px; } .bubble .age:not(.keep) { display: none; } .bubble .age { margin-left: 0; padding-left: 0; } }
+
+/* ==========================================================================
+   7. NODE LIST (accessible twin of the room view)
+   ========================================================================== */
+.nodelist { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.nrow {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; width: 100%;
+  text-align: left; padding: 12px 14px; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2);
+  min-height: 56px;
+}
+.nrow:hover { border-color: var(--accent); }
+.nrow .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--c); }
+.nrow .n { font-weight: 650; display: flex; align-items: center; gap: 6px; }
+.nrow .sub { color: var(--muted); font-size: 12.5px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.nrow .val { font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
+.nrow.dim .val, .nrow.dim .n { opacity: .55; }
+.empty { color: var(--muted); padding: 18px; text-align: center; }
+
+/* ==========================================================================
+   8. CHARTS (REQ-UI-05..07)
+   ========================================================================== */
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 6px 12px;
+  font-size: 13px; font-weight: 600; min-height: 36px; display: inline-flex; align-items: center; gap: 7px;
+}
+.chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip.legend[aria-pressed="false"] { opacity: .45; text-decoration: line-through; }
+.chip.legend[aria-pressed="true"] { background: var(--surface-2); color: var(--text); border-color: var(--line); }
+.chip.legend .sw { width: 10px; height: 10px; border-radius: 50%; background: var(--c); }
+.chart { position: relative; width: 100%; touch-action: pan-y; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .grid-line { stroke: var(--line); stroke-width: 1; }
+.chart .ln { fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.chart .ln.est { stroke-dasharray: 5 4; }
+.chart .cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart .nodata { fill: var(--muted); font-size: 13px; text-anchor: middle; }
+.tip {
+  position: absolute; top: 0; left: 0; pointer-events: none; z-index: 2; min-width: 130px;
+  padding: 8px 10px; border-radius: 12px; font-size: 12.5px; background: var(--surface); border: 1px solid var(--line);
+  box-shadow: var(--shadow); opacity: 0; transition: opacity .12s;
+}
+.tip .tm { color: var(--muted); font-size: 11.5px; margin-bottom: 4px; }
+.tip .tr { display: flex; align-items: center; gap: 7px; justify-content: space-between; }
+.tip .sw { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; }
+.tip b { margin-left: auto; padding-left: 10px; }
+
+/* ==========================================================================
+   9. DIALOGS (node detail, settings, PIN, confirm)
+   ========================================================================== */
+dialog {
+  border: 1px solid var(--line); border-radius: 26px; padding: 0; background: var(--surface); color: var(--text);
+  width: min(720px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); box-shadow: 0 30px 80px rgba(0,0,0,.35);
+}
+dialog.narrow { width: min(420px, calc(100vw - 24px)); }
+dialog::backdrop { background: rgba(10, 8, 4, .5); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
+dialog[open] { animation: pop .18s ease; display: flex; flex-direction: column; }
+@keyframes pop { from { opacity: 0; transform: translateY(14px) scale(.98); } to { opacity: 1; transform: none; } }
+.dhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 20px 6px; }
+.dhead h2 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+.dbody { padding: 8px 20px 20px; overflow-y: auto; display: grid; gap: 18px; }
+@media (max-width: 640px) {
+  dialog { width: 100vw; max-width: 100vw; margin: auto 0 0; border-radius: 26px 26px 0 0; max-height: 92dvh; }
+  dialog.narrow { width: calc(100vw - 24px); margin: auto; border-radius: 26px; }
+}
+.big-temp { font-size: 54px; font-weight: 760; letter-spacing: -.05em; line-height: 1; }
+.big-temp small { font-size: 22px; color: var(--muted); font-weight: 600; letter-spacing: 0; }
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.kv > div { background: var(--surface-2); border-radius: 14px; padding: 10px 12px; min-width: 0; }
+.kv .k { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; }
+.kv .v { font-weight: 600; overflow-wrap: anywhere; }
+.badge { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 3px 10px; font-size: 12.5px; font-weight: 650; background: var(--surface-2); }
+.bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; vertical-align: middle; margin-right: 6px; }
+.bars i { width: 4px; background: var(--line); border-radius: 1px; }
+.bars i.on { background: var(--ok); }
+.section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 8px; font-weight: 700; }
+
+/* forms */
+.field { display: grid; gap: 5px; }
+.field label { font-size: 13px; font-weight: 600; color: var(--muted); }
+input[type=text], input[type=password], input[type=number], select {
+  width: 100%; min-height: 44px; padding: 8px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface);
+}
+.row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn {
+  min-height: 44px; padding: 0 18px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-2); font-weight: 650;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; color: var(--text);
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+.btn.danger.solid { background: var(--bad); border-color: var(--bad); color: #fff; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+.corner-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; max-width: 220px; }
+.corner-pick button { min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); font-weight: 650; }
+.corner-pick button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.netlist { display: grid; gap: 6px; max-height: 200px; overflow-y: auto; }
+.net { display: flex; justify-content: space-between; gap: 10px; align-items: center; text-align: left; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.net[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+.hint { color: var(--muted); font-size: 13px; margin: 0; }
+.msg-err { color: var(--bad); font-size: 13.5px; min-height: 1.2em; margin: 0; }
+.msg-ok { color: var(--ok); font-size: 13.5px; margin: 0; }
+
+/* system section */
+details.card > summary { cursor: pointer; font-weight: 650; font-size: 16px; list-style: none; display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
+details.card > summary::-webkit-details-marker { display: none; }
+details.card[open] > summary { margin-bottom: 12px; }
+details .chev { transition: transform .2s; } details[open] .chev { transform: rotate(180deg); }
+
+/* toast */
+#toast {
+  position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translate(-50%, 20px); opacity: 0;
+  background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 999px; font-weight: 600; z-index: 99;
+  transition: all .25s; pointer-events: none; max-width: calc(100vw - 32px); text-align: center;
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
+footer { color: var(--muted); font-size: 12.5px; text-align: center; padding: 20px 0 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<!-- ======================================================================
+     ICONS: one <symbol> per icon, used with <use href="#i-name"> (REQ-UI-03)
+     ====================================================================== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.8 2.8L16 9.5"/></symbol>
+  <symbol id="i-bat-low" viewBox="0 0 24 24"><rect x="2" y="7" width="17" height="10" rx="2.5"/><path d="M22 11v2M5.5 10.5v3"/></symbol>
+  <symbol id="i-bat-empty" viewBox="0 0 24 24"><rect x="2" y="7" width="17" height="10" rx="2.5"/><path d="M22 11v2M8 9.5l6 5M14 9.5l-6 5"/></symbol>
+  <symbol id="i-bat-unk" viewBox="0 0 24 24"><rect x="2" y="7" width="17" height="10" rx="2.5"/><path d="M22 11v2M9.5 10.5a2 2 0 1 1 3 1.7c-.6.4-1 .7-1 1.3M11.5 15.2v.01"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5 2.5 20h19L12 3.5z"/><path d="M12 10v4.5M12 17.5v.01"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2.5 4.5 13.5H11l-1 8 8.5-11H12l1-8z"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 21V4M5 4.5h12l-2.5 4 2.5 4H5"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M19 7h1M4 17h1M11 17h9"/><circle cx="16" cy="7" r="2.6"/><circle cx="8" cy="17" r="2.6"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M2.5 9a15 15 0 0 1 19 0M5.7 12.4a10.5 10.5 0 0 1 12.6 0M9 15.8a5.5 5.5 0 0 1 6 0M12 19.3v.01"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4"/></symbol>
+  <symbol id="i-therm" viewBox="0 0 24 24"><path d="M10 14.5V5a2 2 0 1 1 4 0v9.5a4 4 0 1 1-4 0z"/></symbol>
+</svg>
+
+<div class="wrap">
+
+  <header class="top">
+    <div class="title">
+      <h1 id="room-name">Room</h1>
+      <p><span id="clock" class="num"></span> · <span id="updated">connecting…</span></p>
+    </div>
+    <div class="top-actions">
+      <span id="health" class="pill" role="status" aria-live="polite"></span>
+      <button id="btn-settings" class="icon-btn" aria-label="Open settings"><svg class="i"><use href="#i-sliders"/></svg><span>Settings</span></button>
+    </div>
+  </header>
+
+  <div id="banners" aria-live="polite"></div>
+
+  <section class="tiles" aria-label="Summary">
+    <div class="tile"><div class="k">Average</div><div class="v num" id="sum-avg">–</div><div class="s" id="sum-avg-s">&nbsp;</div></div>
+    <div class="tile"><div class="k">Coldest</div><div class="v num" id="sum-min">–</div><div class="s" id="sum-min-s">&nbsp;</div></div>
+    <div class="tile"><div class="k">Warmest</div><div class="v num" id="sum-max">–</div><div class="s" id="sum-max-s">&nbsp;</div></div>
+  </section>
+
+  <main class="grid">
+    <section class="card" aria-labelledby="h-room">
+      <div class="card-head"><h2 id="h-room">Room</h2><span class="mute" id="room-hint" style="font-size:13px"></span></div>
+      <div class="room" id="room">
+        <div class="heat" id="heat"></div>
+        <div class="label" id="room-label"></div>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="h-nodes">
+      <div class="card-head"><h2 id="h-nodes">Nodes</h2></div>
+      <ul class="nodelist" id="nodelist"></ul>
+    </section>
+
+    <section class="card span-2" aria-labelledby="h-all" id="all-card">
+      <div class="card-head">
+        <h2 id="h-all">All nodes</h2>
+        <div class="chips" id="range-all" role="group" aria-label="Time range"></div>
+      </div>
+      <div class="chips" id="legend" style="margin-bottom:10px"></div>
+      <div class="chart" id="chart-all"></div>
+    </section>
+
+    <details class="card span-2" id="system">
+      <summary>System <svg class="i chev"><use href="#i-chev"/></svg></summary>
+      <div class="kv" id="sys-kv"></div>
+    </details>
+  </main>
+
+  <footer id="foot"></footer>
+</div>
+
+<!-- ======================================================================
+     DIALOG: node detail (REQ-UI-05)
+     ====================================================================== -->
+<dialog id="dlg-node" aria-labelledby="dn-title">
+  <div class="dhead">
+    <h2 id="dn-title">Node</h2>
+    <button class="icon-btn" data-close aria-label="Close"><svg class="i"><use href="#i-close"/></svg></button>
+  </div>
+  <div class="dbody" id="dn-body"></div>
+</dialog>
+
+<!-- DIALOG: settings (REQ-UI-09) -->
+<dialog id="dlg-settings" aria-labelledby="ds-title">
+  <div class="dhead">
+    <h2 id="ds-title">Settings</h2>
+    <button class="icon-btn" data-close aria-label="Close"><svg class="i"><use href="#i-close"/></svg></button>
+  </div>
+  <div class="dbody" id="ds-body"></div>
+</dialog>
+
+<!-- DIALOG: PIN prompt -->
+<dialog id="dlg-pin" class="narrow" aria-labelledby="dp-title">
+  <form method="dialog" id="pin-form">
+    <div class="dhead"><h2 id="dp-title">Enter PIN</h2></div>
+    <div class="dbody">
+      <p class="hint" id="dp-msg">Changing settings needs the PIN.</p>
+      <div class="field"><label for="dp-input">PIN</label>
+        <input id="dp-input" type="password" inputmode="numeric" autocomplete="off" maxlength="8"></div>
+      <div class="row-actions">
+        <button class="btn primary" value="ok">Unlock</button>
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<!-- DIALOG: confirmation -->
+<dialog id="dlg-confirm" class="narrow" aria-labelledby="dc-title">
+  <form method="dialog" id="confirm-form">
+    <div class="dhead"><h2 id="dc-title">Are you sure?</h2></div>
+    <div class="dbody">
+      <p class="hint" id="dc-text"></p>
+      <div class="field" id="dc-typed" hidden><label for="dc-input" id="dc-typed-label"></label>
+        <input id="dc-input" type="text" autocomplete="off"></div>
+      <div class="row-actions">
+        <button class="btn danger solid" value="ok" id="dc-ok">Confirm</button>
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+
+/* ==========================================================================
+   1. SMALL UTILITIES
+   ========================================================================== */
+
+const $ = (id) => document.getElementById(id);
+
+/** Build a DOM element. Text is always inserted as text, never as HTML (names are user input). */
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k.startsWith("aria-") && v != null) { e.setAttribute(k, String(v)); continue; }   // aria-pressed="false" must stay
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k === "style") e.style.cssText = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return e;
+}
+
+/**
+ * Replace the children of an element. Unlike replaceChildren(), empty values (null,
+ * undefined, false) are skipped instead of becoming the text "null".
+ */
+function fill(parent, ...kids) {
+  parent.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
+}
+
+/** An inline SVG icon from the sprite. */
+function icon(name, label) {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("class", "i");
+  if (label) { s.setAttribute("role", "img"); s.setAttribute("aria-label", label); }
+  else s.setAttribute("aria-hidden", "true");
+  const u = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  u.setAttribute("href", "#i-" + name);
+  s.append(u);
+  return s;
+}
+
+const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** Format hundredths of a degree (or null) as "21.4". */
+const fmtT = (cC) => (cC == null ? "–" : (cC / 100).toFixed(1));
+
+/** "just now", "5 min ago", "2 h 10 min ago", "3 d ago". */
+function fmtAge(sec) {
+  if (sec == null || !isFinite(sec)) return "never";
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 45) return "just now";
+  if (sec < 3600) return Math.round(sec / 60) + " min ago";
+  if (sec < 86400) { const m = Math.round((sec % 3600) / 60); return Math.floor(sec / 3600) + " h" + (m ? " " + m + " min" : "") + " ago"; }
+  return Math.floor(sec / 86400) + " d ago";
+}
+
+/** "22 min", "1 h 30 min" for durations. */
+function fmtDur(sec) {
+  if (sec < 3600) return Math.round(sec / 60) + " min";
+  const m = Math.round((sec % 3600) / 60);
+  return Math.floor(sec / 3600) + " h" + (m ? " " + m + " min" : "");
+}
+
+let toastTimer = 0;
+function toast(text) {
+  const t = $("toast");
+  t.textContent = text;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+/** Per-tab convenience storage; the page works without it (private mode etc.). */
+const store = {
+  get(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { v == null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch (e) { /* ignore */ } },
+};
+
+/** Per-browser preferences (colour scale). Optional: everything works without it. */
+const prefs = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
+  set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } },
+};
+
+/** Cold/warm ends of the colour scale: the user's choice, else the server default (REQ-UI-02). */
+function colourScale() {
+  const own = prefs.get("scale");
+  if (own && isFinite(own.min) && isFinite(own.max) && own.max > own.min) return own;
+  return { min: S.st.ui.tmin, max: S.st.ui.tmax };
+}
+
+/* ==========================================================================
+   2. COLOURS AND STATUS PRESENTATION (REQ-UI-02, REQ-UI-03)
+   ========================================================================== */
+
+/** Cold -> warm gradient stops: blue, teal, green, amber, red. */
+const STOPS = [[0, [59, 130, 246]], [.25, [6, 182, 212]], [.5, [34, 197, 94]], [.75, [245, 158, 11]], [1, [239, 68, 68]]];
+
+/** Colour for a temperature (hundredths of a degree) on the configured scale. */
+function tempRgb(cC, min, max) {
+  const x = clamp((cC / 100 - min) / (max - min), 0, 1);
+  for (let i = 1; i < STOPS.length; i++) {
+    if (x <= STOPS[i][0]) {
+      const [x0, c0] = STOPS[i - 1], [x1, c1] = STOPS[i], k = (x - x0) / (x1 - x0);
+      return c0.map((v, j) => Math.round(v + (c1[j] - v) * k));
+    }
+  }
+  return STOPS[STOPS.length - 1][1];
+}
+const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+/** How each node status is shown. `cls` selects the colour class. */
+const STATUS = {
+  ok:          { label: "OK",            icon: "check",     cls: "ok" },
+  low:         { label: "Low battery",   icon: "bat-low",   cls: "warn" },
+  empty:       { label: "Battery empty", icon: "bat-empty", cls: "bad" },
+  bat_invalid: { label: "Battery error", icon: "bat-unk",   cls: "bad" },
+  stuck:       { label: "No signal",     icon: "alert",     cls: "bad" },
+  waiting:     { label: "Waiting…",      icon: "clock",     cls: "mute" },
+};
+const CORNER_NAMES = ["Top left", "Top right", "Bottom left", "Bottom right"];
+const SERIES_VARS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)"];
+
+/** Series colour of a node (stable per corner so room view and graphs match). */
+const nodeColor = (n) => SERIES_VARS[n.corner % 4];
+
+/* ==========================================================================
+   3. APPLICATION STATE AND API
+   ========================================================================== */
+
+const S = {
+  st: null,                 // last /api/state
+  polledAt: 0,              // Date.now() of that state
+  fails: 0,                 // consecutive failed polls (REQ-UI-12)
+  hist: {},                 // "id:range" -> /api/history response
+  allRange: "24h",
+  detailRange: "24h",
+  hidden: new Set(),        // node ids hidden in the combined chart
+  pin: store.get("pin"),    // settings PIN, kept for this tab only
+  openNode: null,           // node id shown in the detail dialog
+  dismissed: new Set(),     // banners the user closed
+  scan: null,
+};
+
+const RANGES = [["6h", "6 h", 6 * 3600], ["24h", "24 h", 86400], ["7d", "7 d", 7 * 86400], ["all", "All", 0]];
+const rangeSec = (key) => RANGES.find((r) => r[0] === key)[2];
+
+/** Ask for the PIN. Resolves with the PIN text, or null if cancelled. */
+function askPin(message) {
+  const dlg = $("dlg-pin");
+  $("dp-msg").textContent = message || "Changing settings needs the PIN.";
+  $("dp-input").value = "";
+  return new Promise((resolve) => {
+    dlg.addEventListener("close", () => resolve(dlg.returnValue === "ok" ? $("dp-input").value : null), { once: true });
+    dlg.returnValue = "cancel";
+    dlg.showModal();
+    $("dp-input").focus();
+  });
+}
+
+/**
+ * Call the server API. With `auth` the PIN is sent in the X-Pin header; a missing or
+ * wrong PIN opens the PIN dialog and the call is repeated (REQ-SEC-01).
+ */
+async function api(path, { method = "GET", body = null, auth = false } = {}) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const headers = {};
+    if (auth) {
+      if (!S.pin) {
+        S.pin = await askPin(attempt ? "Wrong PIN, try again." : null);
+        if (!S.pin) throw Object.assign(new Error("cancelled"), { cancelled: true });
+      }
+      headers["X-Pin"] = S.pin;
+    }
+    const res = await fetch(path, { method, headers, body: body ? new URLSearchParams(body) : null });
+    const data = await res.json().catch(() => ({}));
+
+    if (res.status === 401 && auth) { S.pin = null; store.set("pin", null); continue; }
+    if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
+    if (auth) store.set("pin", S.pin);
+    return data;
+  }
+  throw new Error("PIN was not accepted");
+}
+
+/** Make sure the PIN is known and valid. @return true if the user may change settings. */
+async function ensurePin() {
+  try { await api("/api/auth", { method: "POST", auth: true }); return true; }
+  catch (e) { if (!e.cancelled) toast(e.message); return false; }
+}
+
+/* ==========================================================================
+   4. POLLING (REQ-WEB-06)
+   ========================================================================== */
+
+async function poll() {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 6000);
+  try {
+    const res = await fetch("/api/state", { signal: ctl.signal, cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    S.st = await res.json();
+    S.polledAt = Date.now();
+    S.fails = 0;
+    renderAll();
+  } catch (e) {
+    S.fails++;
+    renderBanners();
+  } finally {
+    clearTimeout(timer);
+    setTimeout(poll, ((S.st && S.st.ui.poll_s) || 10) * 1000);
+  }
+}
+
+/** Seconds since the node's last packet, kept live between polls. */
+function nodeAge(n) {
+  return n.has_data ? n.age_s + (Date.now() - S.polledAt) / 1000 : null;
+}
+
+/* ==========================================================================
+   5. HISTORY AND CHARTS (REQ-UI-05, REQ-UI-06, REQ-UI-07)
+   ========================================================================== */
+
+/** Fetch (and cache) the history of a node for a range key such as "24h". */
+async function loadHistory(id, rangeKey, maxAgeS = 55) {
+  const key = id + ":" + rangeKey;
+  const hit = S.hist[key];
+  if (hit && Date.now() - hit.at < maxAgeS * 1000) return hit.data;
+
+  const sv = S.st.server, sec = rangeSec(rangeKey);
+  const from = sec && sv.time_valid ? Math.max(0, sv.epoch + (Date.now() - S.polledAt) / 1000 - sec) : 0;
+  const data = await api(`/api/history?node=${id}&from=${Math.floor(from)}`);
+  S.hist[key] = { at: Date.now(), data };
+  return data;
+}
+
+/**
+ * Turn a history response into chart points.
+ * @param kind "temp" (degrees, estimated points re-computed with the current offset)
+ *             or "bat" (volts).
+ */
+function toPoints(hist, kind, node) {
+  const pts = [];
+  for (let i = 0; i < hist.t.length; i++) {
+    if (kind === "bat") {
+      pts.push({ t: hist.t[i], v: hist.b[i] / 1000 });
+    } else {
+      const est = hist.s[i] === 2;
+      // REQ-HIST-04: estimated points follow the CURRENT offset, so a calibration fixes the whole graph.
+      let cC = hist.v[i];
+      if (est && hist.c[i] != null) cC = hist.c[i] - node.cpu_offset_cC;
+      pts.push({ t: hist.t[i], v: cC == null ? null : cC / 100, est });
+    }
+  }
+  return pts;
+}
+
+/** Pick "nice" axis tick values covering [lo, hi]. */
+function niceTicks(lo, hi, count) {
+  const span = Math.max(hi - lo, 0.001), raw = span / count;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 5, 10].map((m) => m * pow).find((s) => s >= raw) || 10 * pow;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(6));
+  return out;
+}
+
+/** Time-axis ticks (absolute mode): aligned to local hours / midnights. */
+function timeTicks(t0, t1) {
+  const steps = [3600, 7200, 10800, 21600, 43200, 86400, 172800];
+  const tz = new Date(t1 * 1000).getTimezoneOffset() * 60;
+  const step = steps.find((s) => (t1 - t0) / s <= 6) || steps[steps.length - 1];
+  const out = [];
+  for (let t = Math.ceil((t0 - tz) / step) * step + tz; t <= t1; t += step) out.push({ t, step });
+  return out;
+}
+
+const fmtClock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const fmtDay = (t) => new Date(t * 1000).toLocaleDateString([], { weekday: "short", day: "numeric" });
+const fmtFull = (t) => new Date(t * 1000).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+/**
+ * Draw a line chart into `host` (an element), as inline SVG.
+ *
+ * cfg = {
+ *   series: [{ id, name, color, gapS, pts: [{t, v, est}] }],   // v may be null = no value
+ *   relative: bool,     // true = no wall clock: x axis is "minutes ago"
+ *   now: number,        // "now" in the same time base as the points
+ *   spanS: number,      // visible time span in seconds (0 = fit the data)
+ *   height: number, area: bool, decimals: number, unit: string
+ * }
+ * - Gaps longer than series.gapS are NOT joined (REQ-UI-07).
+ * - Estimated stretches are dashed (REQ-UI-07).
+ * - Hover / touch shows a crosshair and a tooltip with every visible series.
+ */
+function drawChart(host, cfg) {
+  host._cfg = cfg;
+  if (!host._ro) { host._ro = new ResizeObserver(() => host._cfg && drawChart(host, host._cfg)); host._ro.observe(host); }
+
+  const W = Math.max(host.clientWidth, 260), H = cfg.height || 240;
+  const M = { l: 42, r: 12, t: 10, b: 26 };
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; };
+
+  // Without a wall clock every stamp is "virtual"; with one, stray virtual stamps (< 2024) are ignored.
+  const usable = cfg.series.map((s) => ({ ...s, pts: s.pts.filter((p) => cfg.relative || p.t > 1.7e9) }));
+  const everything = usable.flatMap((s) => s.pts.filter((p) => p.v != null));
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": cfg.label || "Chart" });
+  fill(host, svg);
+
+  // ---- time window ----
+  const tMax = cfg.now || (everything.length ? Math.max(...everything.map((p) => p.t)) : 0);
+  const tMin = cfg.spanS ? tMax - cfg.spanS : (everything.length ? Math.min(...everything.map((p) => p.t)) : 0);
+
+  // Only points inside the window count for the value scale (older ones are clipped away below).
+  const vis = usable.map((s) => ({ ...s, pts: s.pts.filter((p) => p.t >= tMin - s.gapS) }));
+  const all = vis.flatMap((s) => s.pts.filter((p) => p.v != null && p.t >= tMin));
+
+  if (!all.length) {
+    svg.append(el("text", { x: W / 2, y: H / 2, class: "nodata" }, "No data in this range yet"));
+    return;
+  }
+
+  // ---- scales ----
+  let yMin = Math.min(...all.map((p) => p.v)), yMax = Math.max(...all.map((p) => p.v));
+  const pad = Math.max((yMax - yMin) * 0.15, cfg.minPad || 0.4);
+  yMin -= pad; yMax += pad;
+  const x = (t) => M.l + ((t - tMin) / Math.max(tMax - tMin, 1)) * (W - M.l - M.r);
+  const y = (v) => M.t + (1 - (v - yMin) / (yMax - yMin)) * (H - M.t - M.b);
+
+  // ---- grid and axes ----
+  for (const v of niceTicks(yMin, yMax, 4)) {
+    svg.append(el("line", { x1: M.l, x2: W - M.r, y1: y(v), y2: y(v), class: "grid-line" }));
+    svg.append(el("text", { x: M.l - 6, y: y(v) + 4, "text-anchor": "end" }, v.toFixed(cfg.decimals ?? 1) + (cfg.unit || "")));
+  }
+  if (cfg.relative) {
+    const spanS = tMax - tMin, unitS = spanS > 7200 ? 3600 : 60, name = unitS === 3600 ? "h" : "min";
+    const nTicks = Math.min(5, Math.max(2, Math.floor(spanS / unitS)));
+    for (let i = 0; i <= nTicks; i++) {
+      const age = (spanS / nTicks) * (nTicks - i);
+      svg.append(el("text", { x: x(tMax - age), y: H - 6, "text-anchor": i === 0 ? "start" : i === nTicks ? "end" : "middle" },
+        i === nTicks ? "now" : "-" + Math.round(age / unitS) + " " + name));
+    }
+  } else {
+    for (const tk of timeTicks(tMin, tMax)) {
+      svg.append(el("text", { x: x(tk.t), y: H - 6, "text-anchor": "middle" }, tk.step >= 86400 ? fmtDay(tk.t) : fmtClock(tk.t)));
+    }
+  }
+
+  // ---- lines: split into segments at gaps and where the source changes ----
+  // Everything is drawn inside a clipped group so older data never spills past the left edge.
+  const clipId = host._clipId || (host._clipId = "clip" + (++drawChart.seq));
+  const clip = el("clipPath", { id: clipId });
+  clip.append(el("rect", { x: M.l, y: 0, width: W - M.l - M.r, height: H - M.b }));
+  const plot = el("g", { "clip-path": `url(#${clipId})` });
+  svg.append(clip, plot);
+
+  for (const s of vis) {
+    const segs = [];
+    let cur = null, prev = null;
+    for (const p of s.pts) {
+      if (p.v == null) { cur = null; prev = null; continue; }               // missing value = break
+      const gap = prev && p.t - prev.t > s.gapS;
+      if (!cur || gap) { cur = { est: !!p.est, pts: [] }; segs.push(cur); prev = gap ? null : prev; }
+      if (cur.est !== !!p.est) {                                            // source changed: new dash style,
+        const start = prev ? [prev] : [];                                   // starting where the last one ended
+        cur = { est: !!p.est, pts: start }; segs.push(cur);
+      }
+      cur.pts.push(p);
+      prev = p;
+    }
+    for (const sg of segs) {
+      if (sg.pts.length === 1) {
+        plot.append(el("circle", { cx: x(sg.pts[0].t), cy: y(sg.pts[0].v), r: 2.6, fill: s.color }));
+        continue;
+      }
+      const d = sg.pts.map((p, i) => (i ? "L" : "M") + x(p.t).toFixed(1) + " " + y(p.v).toFixed(1)).join(" ");
+      if (cfg.area && !sg.est) {
+        const base = y(yMin), a = el("path", { d: `${d} L${x(sg.pts.at(-1).t).toFixed(1)} ${base} L${x(sg.pts[0].t).toFixed(1)} ${base} Z`, fill: s.color, opacity: 0.12 });
+        plot.append(a);
+      }
+      plot.append(el("path", { d, class: "ln" + (sg.est ? " est" : ""), stroke: s.color }));
+    }
+  }
+
+  // ---- hover / touch crosshair (REQ-UI-05) ----
+  const cross = el("line", { y1: M.t, y2: H - M.b, class: "cross", visibility: "hidden" });
+  const dots = vis.map((s) => { const c = el("circle", { r: 4, fill: s.color, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" }); return c; });
+  const hit = el("rect", { x: M.l, y: M.t, width: W - M.l - M.r, height: H - M.t - M.b, fill: "transparent" });
+  svg.append(cross, ...dots, hit);
+
+  host.querySelector(".tip")?.remove();
+  const tip = h("div", { class: "tip" });
+  host.append(tip);
+
+  const move = (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * W;                    // pointer x in chart units
+    const t = tMin + ((px - M.l) / (W - M.l - M.r)) * (tMax - tMin);
+    let anchor = null;
+    const rows = [];
+    vis.forEach((s, i) => {
+      let best = null;
+      for (const p of s.pts) if (p.v != null && (!best || Math.abs(p.t - t) < Math.abs(best.t - t))) best = p;
+      if (best && Math.abs(best.t - t) < Math.max(s.gapS, (tMax - tMin) / 40)) {
+        dots[i].setAttribute("cx", x(best.t)); dots[i].setAttribute("cy", y(best.v)); dots[i].setAttribute("visibility", "visible");
+        rows.push(h("div", { class: "tr", style: `--c:${s.color}` }, h("i", { class: "sw" }), s.name, h("b", { class: "num" }, best.v.toFixed(cfg.decimals ?? 1) + (cfg.unit || "") + (best.est ? " est." : ""))));
+        if (!anchor || Math.abs(best.t - t) < Math.abs(anchor - t)) anchor = best.t;
+      } else dots[i].setAttribute("visibility", "hidden");
+    });
+    if (anchor == null) { leave(); return; }
+    cross.setAttribute("x1", x(anchor)); cross.setAttribute("x2", x(anchor)); cross.setAttribute("visibility", "visible");
+    fill(tip, h("div", { class: "tm" }, cfg.relative ? fmtAge(cfg.now - anchor) : fmtFull(anchor)), ...rows);
+    const left = (x(anchor) / W) * box.width;
+    tip.style.transform = `translate(${clamp(left + 12, 0, box.width - tip.offsetWidth)}px, 6px)`;
+    tip.style.opacity = 1;
+  };
+  const leave = () => { cross.setAttribute("visibility", "hidden"); dots.forEach((d) => d.setAttribute("visibility", "hidden")); tip.style.opacity = 0; };
+  hit.addEventListener("pointermove", move);
+  hit.addEventListener("pointerdown", move);
+  hit.addEventListener("pointerleave", leave);
+}
+
+drawChart.seq = 0;      // makes clip-path ids unique per chart
+
+/** Refresh the combined chart of all nodes (REQ-UI-06). */
+async function renderAllChart() {
+  const nodes = S.st.nodes.filter((n) => n.has_data);
+  $("all-card").hidden = !S.st.nodes.length;
+
+  // Range chips and legend (rebuilt only when needed to keep focus).
+  const rc = $("range-all");
+  if (!rc.children.length) {
+    RANGES.forEach(([k, label]) => rc.append(h("button", { class: "chip", "aria-pressed": k === S.allRange, "data-k": k, onclick: () => { S.allRange = k; updateChips(rc, k); renderAllChart(); } }, label)));
+  }
+  const lg = $("legend");
+  fill(lg, ...S.st.nodes.map((n) => h("button", { class: "chip legend", "aria-pressed": !S.hidden.has(n.id), style: `--c:${nodeColor(n)}`,
+    onclick: () => { S.hidden.has(n.id) ? S.hidden.delete(n.id) : S.hidden.add(n.id); renderAllChart(); } }, h("i", { class: "sw" }), n.name)));
+
+  const sv = S.st.server;
+  const series = [];
+  let now = 0, relative = !sv.time_valid;
+  for (const n of nodes) {
+    if (S.hidden.has(n.id)) continue;
+    try {
+      const hs = await loadHistory(n.id, S.allRange);
+      now = Math.max(now, hs.now);
+      series.push({ id: n.id, name: n.name, color: nodeColor(n), gapS: 2 * hs.step * Math.max(hs.sleep_s, 900), pts: toPoints(hs, "temp", n) });
+    } catch (e) { /* a failed node is simply missing from the chart */ }
+  }
+  drawChart($("chart-all"), { series, relative, now, spanS: rangeSec(S.allRange), height: 260, unit: "°", label: "Temperature of all nodes" });
+}
+
+function updateChips(group, key) {
+  [...group.children].forEach((c) => c.setAttribute("aria-pressed", c.dataset.k === key));
+}
+
+/* ==========================================================================
+   6. ROOM VIEW AND NODE LIST (REQ-UI-01 .. REQ-UI-04)
+   ========================================================================== */
+
+/** Smoothly count a number element to its new value (skipped for reduced motion). */
+function tween(elem, to) {
+  const from = parseFloat(elem.dataset.v);
+  elem.dataset.v = to;
+  if (reduceMotion || !isFinite(from) || from === to) { elem.textContent = to.toFixed(1); return; }
+  const t0 = performance.now();
+  (function step(now) {
+    const k = clamp((now - t0) / 500, 0, 1), e = 1 - Math.pow(1 - k, 3);
+    elem.textContent = (from + (to - from) * e).toFixed(1);
+    if (k < 1 && elem.dataset.v == to) requestAnimationFrame(step);
+  })(t0);
+}
+
+/** Status icon + text line used by bubbles, list rows and the detail dialog. */
+function statusLine(n) {
+  const st = STATUS[n.status] || STATUS.waiting;
+  const age = nodeAge(n);
+  return { st, age, text: st.label };
+}
+
+/**
+ * Small badges after the node name: charging and the watchdog warning.
+ * Implements: REQ-UI-03, REQ-STATE-07 (the flag marks a node that recovered from a hang;
+ * it is a warning only and never blocks the display).
+ */
+function badges(n) {
+  const out = [];
+  if (n.charging) out.push(icon("bolt", "Charging"));
+  if (n.flags & 0x10) out.push(icon("flag", "The node recovered from a hang"));
+  out.forEach((b) => (b.style.color = b.querySelector("use").getAttribute("href") === "#i-bolt" ? "var(--info)" : "var(--warn)"));
+  return out;
+}
+
+/** Create or update the four corner bubbles and the heat-map. */
+function renderRoom() {
+  const room = $("room"), sv = S.st.server, ui = { tmin: colourScale().min, tmax: colourScale().max };
+  const byCorner = new Map(S.st.nodes.map((n) => [n.corner, n]));
+  const heat = [];
+  const POS = [[14, 16], [86, 16], [14, 84], [86, 84]];
+
+  for (let c = 0; c < 4; c++) {
+    let b = room.querySelector(`.bubble[data-corner="${c}"]`);
+    const n = byCorner.get(c);
+    if (!b) {
+      b = h("button", { class: "bubble", "data-corner": c });
+      room.append(b);
+    }
+    if (!n) {
+      if (c >= sv.max_nodes) { b.hidden = true; continue; }
+      b.className = "bubble ghost";
+      b.disabled = true;
+      fill(b, h("div", { class: "nm" }, CORNER_NAMES[c]), h("div", { class: "st mute" }, "Free corner"));
+      b.style.removeProperty("--tint");
+      continue;
+    }
+
+    b.hidden = false; b.disabled = false;
+    const { st, age, text } = statusLine(n);
+    // REQ-STATE-05: a stuck node keeps its last values, greyed out, with "last seen X ago".
+    const dim = n.status === "stuck" || n.status === "waiting";
+    b.className = "bubble" + (dim ? " dim" : "");
+    b.setAttribute("aria-label", `${n.name}: ${n.temp_cC == null ? "no value" : fmtT(n.temp_cC) + " degrees"}, ${st.label}`);
+    b.onclick = () => openNode(n.id);
+
+    const hasT = n.has_data && n.temp_cC != null;
+    if (hasT) {
+      const col = tempRgb(n.temp_cC, ui.tmin, ui.tmax);
+      b.style.setProperty("--tint", rgb(col, dim ? .35 : .8));
+      if (!dim) heat.push(`radial-gradient(circle at ${POS[c][0]}% ${POS[c][1]}%, ${rgb(col, .42)} 0, transparent 58%)`);
+    } else b.style.removeProperty("--tint");
+
+    // Rebuild the static parts only when they change; the number is tweened in place.
+    const sig = [n.name, n.status, hasT, n.src, n.charging, n.flags].join("|");
+    if (b._sig !== sig) {
+      b._sig = sig;
+      const tv = h("span", { class: "num" }, hasT ? "" : "–");
+      b._tv = tv;
+      fill(b, 
+        h("div", { class: "row" }, h("span", { class: "nm" }, n.name), h("span", { class: "badges" }, badges(n))),
+        h("div", { class: "t num" }, n.src === "est" && hasT ? "~" : null, tv, hasT ? h("small", null, "°C") : null,
+          n.src === "est" && hasT ? h("span", { class: "tag", title: "Estimated from the CPU temperature" }, "est.") : null),
+        h("div", { class: "st " + st.cls }, icon(st.icon), h("span", null, text), h("span", { class: "age" + (n.status === "stuck" ? " keep" : "") }, fmtAge(age))));
+    } else {
+      b.querySelector(".age").textContent = fmtAge(age);
+    }
+    if (hasT) tween(b._tv, n.temp_cC / 100);
+  }
+
+  $("heat").style.background = heat.join(",");
+  fill($("room-label"), 
+    h("b", null, S.st.room),
+    S.st.nodes.length ? null : "No nodes yet. They appear here after their first report.");
+  $("room-hint").textContent = `Nodes must use channel ${sv.wifi.channel}`;
+}
+
+/** The compact node list next to / below the room view. */
+function renderNodeList() {
+  const list = $("nodelist");
+  if (!S.st.nodes.length) {
+    fill(list, h("li", { class: "empty" }, `Waiting for the first node. Make sure it is set to channel ${S.st.server.wifi.channel}.`));
+    return;
+  }
+  const rows = [...S.st.nodes].sort((a, b) => a.corner - b.corner).map((n) => {
+    const { st, age, text } = statusLine(n);
+    const dim = n.status === "stuck" || n.status === "waiting";
+    return h("li", null, h("button", { class: "nrow" + (dim ? " dim" : ""), onclick: () => openNode(n.id), style: `--c:${nodeColor(n)}` },
+      h("i", { class: "dot" }),
+      h("div", null,
+        h("div", { class: "n" }, n.name, ...badges(n)),
+        h("div", { class: "sub " + st.cls }, icon(st.icon), text, n.has_data ? h("span", { class: "mute" }, "· " + fmtAge(age)) : null)),
+      h("div", { class: "val num" }, n.has_data && n.temp_cC != null ? (n.src === "est" ? "~" : "") + fmtT(n.temp_cC) + "°" : "–")));
+  });
+  fill(list, ...rows);
+}
+
+/** Average / coldest / warmest over nodes that have a trustworthy value (REQ-UI-04). */
+function renderSummary() {
+  const live = S.st.nodes.filter((n) => n.has_data && n.temp_cC != null && n.status !== "stuck");
+  const set = (id, val, sub) => {
+    const e = $(id);
+    fill(e, val == null ? "–" : fmtT(val), val == null ? null : h("small", null, "°C"));
+    $(id + "-s").textContent = sub || " ";
+  };
+  if (!live.length) { set("sum-avg", null, "No data"); set("sum-min", null); set("sum-max", null); }
+  else {
+    const lo = live.reduce((a, b) => (b.temp_cC < a.temp_cC ? b : a)), hi = live.reduce((a, b) => (b.temp_cC > a.temp_cC ? b : a));
+    set("sum-avg", live.reduce((s, n) => s + n.temp_cC, 0) / live.length, `${live.length} of ${S.st.nodes.length} nodes`);
+    set("sum-min", lo.temp_cC, lo.name);
+    set("sum-max", hi.temp_cC, hi.name);
+  }
+
+  // Health pill: how many nodes need attention?
+  const bad = S.st.nodes.filter((n) => ["stuck", "empty", "low", "bat_invalid"].includes(n.status)).length;
+  const pill = $("health");
+  pill.className = "pill";
+  if (!S.st.nodes.length) { pill.classList.add("mute"); fill(pill, icon("clock"), "No nodes yet"); }
+  else if (bad) { pill.classList.add(S.st.nodes.some((n) => n.status === "stuck" || n.status === "empty") ? "bad" : "warn"); fill(pill, icon("alert"), `${bad} ${bad === 1 ? "node needs" : "nodes need"} attention`); }
+  else { pill.classList.add("ok"); fill(pill, icon("check"), `All ${S.st.nodes.length} ${S.st.nodes.length === 1 ? "node" : "nodes"} OK`); }
+}
+
+/* ==========================================================================
+   7. BANNERS AND SYSTEM SECTION (REQ-UI-08, REQ-UI-10, REQ-UI-12)
+   ========================================================================== */
+
+function renderBanners() {
+  const list = [];
+  const add = (id, cls, ic, text, action) => { if (!S.dismissed.has(id)) list.push({ id, cls, ic, text, action }); };
+
+  if (S.fails >= 2) add("offline", "bad", "wifi", "Connection lost, retrying… The last values stay visible.");
+  if (S.st) {
+    const sv = S.st.server, w = sv.wifi;
+    if (w.mode === "ap" && !w.has_credentials)
+      add("firstrun", "info", "wifi", `Connect me to your Wi-Fi: join "${w.ap_ssid}" and enter your router details.`, ["Set up Wi-Fi", () => openSettings("wifi")]);
+    else if (w.mode !== "sta")
+      add("apmode", "warn", "wifi", `Router not reachable. Running in access-point mode on channel ${w.channel}; I keep trying in the background.`);
+    if (sv.pin_default) add("pin", "warn", "alert", "The default PIN (1234) is still in use.", ["Change PIN", () => openSettings("security")]);
+    if (sv.unknown_ids.length) add("unknown", "warn", "alert", `Heard node ${sv.unknown_ids.join(", ")} but all ${sv.max_nodes} slots are in use. Forget a node in Settings to make room.`);
+    if (!sv.time_valid) add("time", "info", "clock", "The clock is not set (no internet). Times are shown relative to now.");
+  }
+
+  fill($("banners"), ...list.map((b) => h("div", { class: "banner " + b.cls },
+    icon(b.ic), h("span", { class: "msg" }, b.text),
+    b.action ? h("button", { class: "link", onclick: b.action[1] }, b.action[0]) : null,
+    b.id === "offline" ? null : h("button", { class: "link", "aria-label": "Dismiss", onclick: () => { S.dismissed.add(b.id); renderBanners(); } }, icon("close")))));
+}
+
+function kv(k, v) { return h("div", null, h("div", { class: "k" }, k), h("div", { class: "v" }, v)); }
+
+function renderSystem() {
+  const sv = S.st.server, w = sv.wifi, st = sv.stats;
+  const modeText = { sta: "Connected to router", ap: "Access point only", "ap+sta": "Access point + router search" }[w.mode] || w.mode;
+  fill($("sys-kv"), 
+    kv("Wi-Fi", `${modeText}${w.ssid ? " · " + w.ssid : ""}`),
+    kv("Radio channel", `${w.channel} — nodes must use this channel`),
+    kv("Address", `${w.ip} · ${sv.hostname}`),
+    kv("Router signal", w.connected ? w.rssi + " dBm" : "–"),
+    kv("Uptime", fmtDur(sv.uptime_s)),
+    kv("Memory", `${Math.round(sv.heap_free / 1024)} KB free (low ${Math.round(sv.heap_min / 1024)} KB)`),
+    kv("Packets", `${st.accepted} accepted · ${st.duplicates} duplicate copies`),
+    kv("Rejected", `${st.bad_crc} bad CRC · ${st.bad_len} bad length · ${st.bad_ver} bad version`),
+    kv("Unknown / lost", `${st.unknown} from unknown nodes · ${st.overflow} queue overflows`),
+    kv("Firmware", "Server v" + sv.fw),
+    kv("Clock", sv.time_valid ? new Date(sv.epoch * 1000).toLocaleString() : "Not set"));
+  $("foot").textContent = `Room Temperature · server firmware v${sv.fw} · polls every ${S.st.ui.poll_s} s`;
+}
+
+/* ==========================================================================
+   8. NODE DETAIL DIALOG (REQ-UI-05, REQ-DATA-04)
+   ========================================================================== */
+
+const FLAG_NAMES = [[0x01, "No DS18B20 sensor"], [0x02, "DS18B20 error"], [0x04, "Battery reading invalid"], [0x08, "CPU temperature error"], [0x10, "Recovered from a hang"]];
+
+/** Signal strength as four bars. */
+function sigBars(rssi) {
+  const level = rssi == null || rssi === 0 ? 0 : rssi > -55 ? 4 : rssi > -67 ? 3 : rssi > -77 ? 2 : 1;
+  return h("span", { class: "bars", role: "img", "aria-label": `Signal ${level} of 4` }, [1, 2, 3, 4].map((i) => h("i", { class: i <= level ? "on" : "", style: `height:${i * 3 + 2}px` })));
+}
+
+async function openNode(id) {
+  S.openNode = id;
+  S.editing = false;
+  $("dlg-node").showModal();
+  renderNodeDialog();
+}
+
+/** Fill the detail dialog from the latest state (called on open and after every poll). */
+function renderNodeDialog() {
+  const n = S.st.nodes.find((x) => x.id === S.openNode);
+  if (!n) { $("dlg-node").close(); return; }
+  if (S.editing) return;                                                      // never overwrite a form being edited
+
+  $("dn-title").textContent = n.name;
+  const { st, age } = statusLine(n);
+  const body = $("dn-body");
+  const hasT = n.has_data && n.temp_cC != null;
+
+  const flags = FLAG_NAMES.filter(([bit]) => n.flags & bit).map(([, name]) => h("span", { class: "badge warn" }, icon("flag"), name));
+  const batText = n.has_data ? `${(n.bat_mv / 1000).toFixed(2)} V · ${n.bat_pct}% (estimate)` : "–";
+
+  fill(body, 
+    h("div", { style: "display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap" },
+      h("div", { class: "big-temp num" }, hasT ? (n.src === "est" ? "~" : "") + fmtT(n.temp_cC) : "–", hasT ? h("small", null, " °C") : null),
+      h("div", { style: "display:grid;gap:6px;padding-bottom:6px;justify-items:start" },
+        h("span", { class: "badge " + st.cls }, icon(st.icon), st.label),
+        n.src === "est" ? h("span", { class: "badge" }, "Estimated from CPU temperature") : null,
+        n.charging ? h("span", { class: "badge info" }, icon("bolt"), "Charging") : null)),
+
+    h("div", null,
+      h("div", { class: "card-head" }, h("p", { class: "section-title", style: "margin:0" }, "Temperature"),
+        h("div", { class: "chips", id: "dn-range", role: "group", "aria-label": "Time range" },
+          RANGES.map(([k, label]) => h("button", { class: "chip", "aria-pressed": k === S.detailRange, "data-k": k,
+            onclick: () => { S.detailRange = k; updateChips($("dn-range"), k); loadNodeCharts(); } }, label)))),
+      h("div", { class: "chart", id: "dn-chart-t" })),
+
+    h("div", null, h("p", { class: "section-title" }, "Battery voltage"), h("div", { class: "chart", id: "dn-chart-b" })),
+
+    h("div", null, h("p", { class: "section-title" }, "Details"),
+      h("div", { class: "kv" },
+        kv("Last report", n.has_data ? fmtAge(age) : "never"),
+        kv("Reports every", fmtDur(n.sleep_s || 0) + (n.sleep_s ? ` · flagged after ${fmtDur(n.stuck_after_s)}` : "")),
+        kv("Battery", batText),
+        kv("5V pin", n.has_data ? (n.vbus_mv / 1000).toFixed(2) + " V" : "–"),
+        kv("CPU temperature (raw)", n.has_data && n.cpu_cC != null ? fmtT(n.cpu_cC) + " °C" + (n.src === "est" ? ` (offset ${fmtT(n.cpu_offset_cC)} °C)` : "") : "–"),
+        kv("Signal", n.has_data ? [sigBars(n.rssi), n.rssi ? n.rssi + " dBm" : "n/a"] : "–"),
+        kv("Packets", `${n.rx} received · ${n.dups} copies dropped · ${n.crc_err} damaged`),
+        kv("Node firmware", n.has_data ? "v" + n.node_fw + " · cycle " + n.boot : "–"),
+        kv("Node ID", String(n.id)))),
+
+    flags.length ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap" }, flags) : null,
+
+    h("div", { class: "row-actions" },
+      h("button", { class: "btn", onclick: () => editNode(n) }, icon("edit"), "Edit node"),
+      h("a", { class: "btn", href: `/api/export.csv?node=${n.id}`, download: `${n.name}.csv` }, icon("down"), "Download CSV")));
+
+  loadNodeCharts();      // the body was rebuilt, so draw the charts again (history is cached, this is cheap)
+}
+
+/** Draw the two charts of the open node. */
+async function loadNodeCharts() {
+  const n = S.st.nodes.find((x) => x.id === S.openNode);
+  if (!n || !n.has_data || !$("dn-chart-t")) { return; }
+  try {
+    const hs = await loadHistory(n.id, S.detailRange);
+    if (!$("dn-chart-t")) return;
+    const common = { relative: !hs.time_valid, now: hs.now, spanS: rangeSec(S.detailRange), area: true };
+    const gapS = 2 * hs.step * Math.max(hs.sleep_s, 900);
+    drawChart($("dn-chart-t"), { ...common, series: [{ id: n.id, name: n.name, color: nodeColor(n), gapS, pts: toPoints(hs, "temp", n) }], height: 220, unit: "°", label: `Temperature of ${n.name}` });
+    drawChart($("dn-chart-b"), { ...common, series: [{ id: n.id, name: "Battery", color: "var(--ok)", gapS, pts: toPoints(hs, "bat", n) }], height: 150, decimals: 2, unit: " V", minPad: 0.05, label: `Battery voltage of ${n.name}` });
+  } catch (e) { /* keep the previous drawing */ }
+}
+
+/** Switch the detail dialog to the edit form (PIN protected, REQ-NODE-02). */
+async function editNode(n) {
+  if (!(await ensurePin())) return;
+  S.editing = true;
+  let corner = n.corner;
+  const name = h("input", { type: "text", id: "ed-name", value: n.name, maxlength: 20 });
+  const offset = h("input", { type: "number", id: "ed-off", value: (n.cpu_offset_cC / 100).toFixed(1), step: "0.1", min: "-50", max: "50" });
+  const pick = h("div", { class: "corner-pick", role: "group", "aria-label": "Corner" });
+  const drawPick = () => fill(pick, ...CORNER_NAMES.map((c, i) => h("button", { type: "button", "aria-pressed": i === corner, onclick: () => { corner = i; drawPick(); } }, c)));
+  drawPick();
+  const err = h("p", { class: "msg-err" });
+
+  fill($("dn-body"), 
+    h("div", { class: "field" }, h("label", { for: "ed-name" }, "Name"), name),
+    h("div", { class: "field" }, h("label", null, "Position in the room"), pick),
+    h("div", { class: "field" }, h("label", { for: "ed-off" }, "CPU temperature offset (°C)"), offset,
+      h("p", { class: "hint" }, "Used only when this node has no DS18B20 sensor: room temperature = CPU temperature − offset. Calibrate against a reference thermometer.")),
+    err,
+    h("div", { class: "row-actions" },
+      h("button", { class: "btn primary", onclick: async () => {
+        try {
+          await api("/api/node", { method: "POST", auth: true, body: { id: n.id, name: name.value, corner, offset: Math.round(parseFloat(offset.value || "0") * 100) } });
+          S.editing = false; S.hist = {}; toast("Saved"); await poll1();
+        } catch (e) { if (!e.cancelled) err.textContent = e.message; }
+      } }, "Save"),
+      h("button", { class: "btn", onclick: () => { S.editing = false; renderNodeDialog(); } }, "Cancel"),
+      h("button", { class: "btn danger", onclick: () => forgetNode(n) }, icon("trash"), "Forget node")));
+}
+
+async function forgetNode(n) {
+  if (!(await confirmDialog(`Forget ${n.name}?`, "Its history is deleted. If it keeps transmitting it will be added again as a new node.", "Forget"))) return;
+  try {
+    await api("/api/node/delete", { method: "POST", auth: true, body: { id: n.id } });
+    S.editing = false; S.hist = {}; $("dlg-node").close(); toast("Node forgotten"); poll1();
+  } catch (e) { if (!e.cancelled) toast(e.message); }
+}
+
+/* ==========================================================================
+   9. SETTINGS DIALOG (REQ-UI-09, REQ-UI-10)
+   ========================================================================== */
+
+/** Confirmation dialog; optionally the user must type a word. Resolves true/false. */
+function confirmDialog(title, text, okLabel, typeWord) {
+  const dlg = $("dlg-confirm");
+  $("dc-title").textContent = title;
+  $("dc-text").textContent = text;
+  $("dc-ok").textContent = okLabel || "Confirm";
+  const typed = $("dc-typed"), input = $("dc-input");
+  typed.hidden = !typeWord;
+  input.value = "";
+  if (typeWord) $("dc-typed-label").textContent = `Type ${typeWord} to confirm`;
+  return new Promise((resolve) => {
+    const guard = (e) => { if (e.submitter && e.submitter.value === "ok" && typeWord && input.value !== typeWord) { e.preventDefault(); input.focus(); } };
+    $("confirm-form").addEventListener("submit", guard, { once: true });
+    dlg.addEventListener("close", () => { $("confirm-form").removeEventListener("submit", guard); resolve(dlg.returnValue === "ok"); }, { once: true });
+    dlg.returnValue = "cancel";
+    dlg.showModal();
+  });
+}
+
+async function openSettings(section) {
+  if (!(await ensurePin())) return;
+  renderSettings();
+  const dlg = $("dlg-settings");
+  if (!dlg.open) dlg.showModal();
+  if (section) $("set-" + section)?.scrollIntoView({ block: "start" });
+}
+
+/** Run an API action from the settings and report the result in a toast. */
+async function act(path, body, okText) {
+  try { await api(path, { method: "POST", auth: true, body }); if (okText) toast(okText); return true; }
+  catch (e) { if (!e.cancelled) toast(e.message); return false; }
+}
+
+function renderSettings() {
+  const sv = S.st.server, w = sv.wifi, body = $("ds-body");
+  const wifiMsg = h("p", { class: "msg-err", id: "wifi-msg", role: "status" });
+  const ssid = h("input", { type: "text", id: "wifi-ssid", value: w.ssid || "", maxlength: 32, autocomplete: "off", autocapitalize: "off" });
+  const pass = h("input", { type: "password", id: "wifi-pass", maxlength: 64, autocomplete: "off" });
+  const nets = h("div", { class: "netlist", id: "netlist" });
+  const room = h("input", { type: "text", id: "room-in", value: S.st.room, maxlength: 24 });
+  const newPin = h("input", { type: "password", id: "pin-new", inputmode: "numeric", maxlength: 8, autocomplete: "new-password" });
+  const pinMsg = h("p", { class: "msg-err" });
+  const scale = colourScale();
+  const scMin = h("input", { type: "number", id: "sc-min", value: scale.min, step: "1" });
+  const scMax = h("input", { type: "number", id: "sc-max", value: scale.max, step: "1" });
+  const scMsg = h("p", { class: "msg-err" });
+
+  fill(body, 
+    h("section", { id: "set-wifi" }, h("p", { class: "section-title" }, "Wi-Fi"),
+      h("p", { class: "hint" }, w.has_credentials ? `Saved network: ${w.ssid || "(not connected)"}.` : "No network saved yet."),
+      h("p", { class: "hint", style: "margin-top:6px" }, "Important: the sensor nodes must be set to the same radio channel as your router (now channel " + w.channel + "). A fixed router channel is recommended."),
+      h("div", { class: "row-actions", style: "margin:10px 0" },
+        h("button", { class: "btn", onclick: scanWifi }, icon("wifi"), "Scan networks")),
+      h("p", { class: "hint", style: "margin-bottom:8px" }, "Scanning pauses sensor reception for a few seconds."),
+      nets,
+      h("div", { class: "field", style: "margin-top:10px" }, h("label", { for: "wifi-ssid" }, "Network name"), ssid),
+      h("div", { class: "field", style: "margin-top:10px" }, h("label", { for: "wifi-pass" }, "Password"), pass),
+      wifiMsg,
+      h("div", { class: "row-actions" }, h("button", { class: "btn primary", onclick: () => saveWifi(ssid, pass, wifiMsg) }, "Save and connect"))),
+
+    h("section", { id: "set-room" }, h("p", { class: "section-title" }, "Room"),
+      h("div", { class: "field" }, h("label", { for: "room-in" }, "Room name"), room),
+      h("div", { class: "row-actions", style: "margin-top:10px" },
+        h("button", { class: "btn", onclick: async () => { if (await act("/api/room", { name: room.value }, "Saved")) poll1(); } }, "Save name"))),
+
+    h("section", { id: "set-display" }, h("p", { class: "section-title" }, "Display"),
+      h("p", { class: "hint", style: "margin-bottom:8px" }, "Temperature range of the colour scale (cold blue to warm red). Saved in this browser only."),
+      h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px" },
+        h("div", { class: "field" }, h("label", { for: "sc-min" }, "Cold end (°C)"), scMin),
+        h("div", { class: "field" }, h("label", { for: "sc-max" }, "Warm end (°C)"), scMax)),
+      scMsg,
+      h("div", { class: "row-actions", style: "margin-top:10px" },
+        h("button", { class: "btn", onclick: () => {
+          const lo = parseFloat(scMin.value), hi = parseFloat(scMax.value);
+          if (!isFinite(lo) || !isFinite(hi) || hi - lo < 2) { scMsg.textContent = "The warm end must be at least 2 °C above the cold end."; return; }
+          scMsg.textContent = ""; prefs.set("scale", { min: lo, max: hi }); renderRoom(); toast("Saved");
+        } }, "Save range"),
+        h("button", { class: "btn", onclick: () => { prefs.set("scale", null); scMin.value = S.st.ui.tmin; scMax.value = S.st.ui.tmax; renderRoom(); toast("Default restored"); } }, "Use default"))),
+
+    h("section", { id: "set-nodes" }, h("p", { class: "section-title" }, "Nodes"),
+      S.st.nodes.length
+        ? h("div", { class: "nodelist" }, S.st.nodes.map((n) => h("div", { class: "nrow", style: `--c:${nodeColor(n)}` },
+            h("i", { class: "dot" }), h("div", null, h("div", { class: "n" }, n.name), h("div", { class: "sub" }, `Node ${n.id} · ${CORNER_NAMES[n.corner]}`)),
+            h("button", { class: "btn", onclick: () => { $("dlg-settings").close(); openNode(n.id).then(() => editNode(n)); } }, "Edit"))))
+        : h("p", { class: "hint" }, "No nodes yet.")),
+
+    h("section", { id: "set-security" }, h("p", { class: "section-title" }, "Security"),
+      h("div", { class: "field" }, h("label", { for: "pin-new" }, "New PIN (4-8 digits)"), newPin), pinMsg,
+      h("div", { class: "row-actions", style: "margin-top:10px" },
+        h("button", { class: "btn", onclick: async () => {
+          if (!/^\d{4,8}$/.test(newPin.value)) { pinMsg.textContent = "Use 4 to 8 digits."; return; }
+          pinMsg.textContent = "";
+          if (await act("/api/pin", { new: newPin.value }, "PIN changed")) { S.pin = newPin.value; store.set("pin", S.pin); newPin.value = ""; poll1(); }
+        } }, "Change PIN"))),
+
+    h("section", { id: "set-maint" }, h("p", { class: "section-title" }, "Maintenance"),
+      h("div", { class: "row-actions" },
+        h("button", { class: "btn", onclick: async () => { if (await confirmDialog("Restart the server?", "It is back in about 20 seconds. History is saved first.", "Restart") && await act("/api/restart", {}, "Restarting…")) { $("dlg-settings").close(); } } }, "Restart"),
+        h("button", { class: "btn danger", onclick: async () => { if (await confirmDialog("Erase all history?", "The graphs of all nodes start empty.", "Erase") && await act("/api/history/clear", {}, "History erased")) { S.hist = {}; renderAllChart(); } } }, icon("trash"), "Clear history"),
+        h("button", { class: "btn danger", onclick: async () => { if (await confirmDialog("Factory reset?", "Erases Wi-Fi, nodes, PIN and history, then restarts into setup mode.", "Erase everything", "RESET") && await act("/api/factory-reset", { confirm: "RESET" }, "Resetting…")) { $("dlg-settings").close(); } } }, "Factory reset"))),
+
+    h("p", { class: "hint" }, `Server firmware v${sv.fw}. Hold the BOOT button for 10 s within 30 s after power-up to factory reset without this page.`));
+}
+
+/** Start a Wi-Fi scan and poll until it is done. */
+async function scanWifi() {
+  const box = $("netlist");
+  fill(box, h("p", { class: "hint" }, "Scanning…"));
+  try {
+    let r = await api("/api/wifi/scan?start=1", { auth: true });
+    for (let i = 0; r.scanning && i < 12; i++) { await new Promise((ok) => setTimeout(ok, 1200)); r = await api("/api/wifi/scan", { auth: true }); }
+    const seen = new Map();                                                    // strongest entry per name
+    r.networks.forEach((n) => { if (!seen.has(n.ssid) || seen.get(n.ssid).rssi < n.rssi) seen.set(n.ssid, n); });
+    const items = [...seen.values()].sort((a, b) => b.rssi - a.rssi);
+    fill(box, ...(items.length ? items : [null]).map((n) => n
+      ? h("button", { class: "net", type: "button", "aria-pressed": false, onclick: (ev) => {
+          $("wifi-ssid").value = n.ssid; $("wifi-pass").focus();
+          box.querySelectorAll(".net").forEach((b) => b.setAttribute("aria-pressed", "false")); ev.currentTarget.setAttribute("aria-pressed", "true"); } },
+          h("span", null, n.ssid), h("span", { class: "mute" }, `ch ${n.channel} · ${n.rssi} dBm${n.secure ? "" : " · open"}`))
+      : h("p", { class: "hint" }, "No networks found.")));
+  } catch (e) { fill(box, h("p", { class: "msg-err" }, e.cancelled ? "" : e.message)); }
+}
+
+/** Save credentials, then watch /api/state until the server reports the result. */
+async function saveWifi(ssidEl, passEl, msg) {
+  msg.className = "msg-err"; msg.textContent = "";
+  if (!ssidEl.value) { msg.textContent = "Enter the network name."; return; }
+  if (passEl.value && passEl.value.length < 8) { msg.textContent = "A password has 8 to 64 characters."; return; }
+  if (!(await act("/api/wifi", { ssid: ssidEl.value, pass: passEl.value }))) return;
+
+  msg.className = "hint"; msg.textContent = "Connecting…";
+  for (let i = 0; i < 20; i++) {
+    await new Promise((ok) => setTimeout(ok, 1500));
+    try {
+      const st = await (await fetch("/api/state", { cache: "no-store" })).json();
+      if (st.server.wifi.connected) {
+        msg.className = "msg-ok";
+        msg.textContent = `Connected. Join your home Wi-Fi and open http://${st.server.hostname} (${st.server.wifi.ip}). Nodes must use channel ${st.server.wifi.channel}.`;
+        return;
+      }
+    } catch (e) { /* the access point may be changing channel: keep trying */ }
+  }
+  msg.className = "msg-err";
+  msg.textContent = "Could not connect. Check name and password; the setup network stays available.";
+}
+
+/* ==========================================================================
+   10. RENDER ALL, CLOCK, START
+   ========================================================================== */
+
+function renderAll() {
+  const sv = S.st.server;
+  $("room-name").textContent = S.st.room;
+  document.title = S.st.room + " · Room Temperature";
+  $("updated").textContent = "updated just now";
+  renderBanners();
+  renderSummary();
+  renderRoom();
+  renderNodeList();
+  renderSystem();
+  if ($("dlg-node").open) renderNodeDialog();
+  if (!renderAll.chartAt || Date.now() - renderAll.chartAt > 60000) {         // charts refresh once a minute
+    renderAll.chartAt = Date.now();
+    renderAllChart();
+  }
+}
+
+function tickClock() {
+  $("clock").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (S.polledAt) {
+    const s = Math.round((Date.now() - S.polledAt) / 1000);
+    $("updated").textContent = s < 5 ? "updated just now" : "updated " + s + " s ago";
+  }
+}
+
+/** One extra poll right now (after a change the user made). */
+async function poll1() {
+  try { S.st = await (await fetch("/api/state", { cache: "no-store" })).json(); S.polledAt = Date.now(); renderAll(); renderAllChart(); } catch (e) { /* the regular poll will retry */ }
+}
+
+// Dialogs: close buttons and click on the backdrop.
+document.querySelectorAll("dialog").forEach((d) => {
+  d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+  d.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => d.close()));
+});
+$("dlg-node").addEventListener("close", () => { S.openNode = null; S.editing = false; });
+$("btn-settings").addEventListener("click", () => openSettings());
+
+tickClock();
+setInterval(tickClock, 1000);
+poll();
+</script>
+</body>
+</html>
